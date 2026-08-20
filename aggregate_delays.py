@@ -43,6 +43,14 @@ ORIGIN_STATIONS = [
     "Köln Hbf", "Frankfurt (Main) Hbf", "Stuttgart Hbf", "München Hbf",
     "Leipzig Hbf", "Dresden Hbf", "Düsseldorf Hbf",
 ]
+# Berlin Hbf hat zwei Ebenen mit unterschiedlichen IRIS-Namen: Fernverkehr
+# (ICE/IC) fährt fast nur an den unterirdischen Gleisen 1-8, die separat als
+# "Berlin Hbf (tief)" geführt werden. Beide Schreibweisen werden hier auf
+# denselben Anzeigenamen "Berlin Hbf" normalisiert.
+STATION_NAME_ALIASES = {
+    "Berlin Hbf (tief)": "Berlin Hbf",
+    "Berlin Hbf (S-Bahn)": "Berlin Hbf",
+}
 # Ziele werden auf dieselbe Liste großer Hauptbahnhöfe beschränkt — sonst
 # entstehen tausende Kombinationen mit kleinen/seltenen Zielbahnhöfen, die
 # die Datei unnötig aufblähen und praktisch kaum gesucht werden.
@@ -97,6 +105,7 @@ def load_month(month):
         (df["departure_change_time"] - df["departure_planned_time"]).dt.total_seconds() / 60
     ).fillna(0).round().astype(int)
     df["is_canceled"] = df["arrival_is_canceled"].fillna(False) | df["departure_is_canceled"].fillna(False)
+    df["station_name"] = df["station_name"].replace(STATION_NAME_ALIASES)
 
     return df
 
