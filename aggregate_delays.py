@@ -1,20 +1,14 @@
 """
-Verspätungsmarkt – historische Verspätungsstatistik pro Route+Uhrzeit
+Verspätungsmarkt – historische Verspätungsstatistik pro Route+Uhrzeit,
+inkl. Tagesverlauf (für "Goldpick"-Karte im Stil von delaybahn.com)
 -----------------------------------------------------------------
-Lädt die letzten paar Monate der öffentlichen, echten DB-Verspätungsdaten
-von HuggingFace (piebro/deutsche-bahn-data, CC BY 4.0) herunter und
-berechnet für jede Kombination aus:
-    Startbahnhof (einer der ORIGIN_STATIONS) x Zielbahnhof x Abfahrtsstunde
-eine echte historische Quote: wie oft kam eine Fahrt, die zu dieser Stunde
-in diesem Bahnhof abfuhr und dort auch hielt, am Zielbahnhof >=20 Min zu
-spät an oder fiel aus.
-
-Das misst die Verspätung tatsächlich am Ziel (nicht über alle Zwischenhalte
-gemittelt), gematcht über die Fahrt-ID (train_line_ride_id) und die
-Reihenfolge der Halte (train_line_station_num).
-
-Zusätzlich (als Fallback für Fälle ohne genug Route-Daten): dieselbe Quote
-grob pro Zugkategorie, unabhängig von der genauen Route.
+Lädt echte DB-Verspätungsdaten von HuggingFace (piebro/deutsche-bahn-data,
+CC BY 4.0) und berechnet pro Route (Start -> Ziel, gebündelt nach
+Abfahrtsstunde):
+    - Gesamt-Kennzahlen: samples, pct (Anteil >=20 Min oder Ausfall), avgDelay
+    - "days": Tagesreihe der letzten 30 Tage mit Verspätung in Min pro Tag
+      (null wenn ausgefallen, fehlt der Tag ganz wenn keine Fahrt vorlag)
+    - cancelledCount: Anzahl (Teil-)Ausfälle in den letzten 30 Tagen
 
 Nutzung:
     pip install pandas pyarrow requests
@@ -23,31 +17,20 @@ Nutzung:
 
 import json
 import sys
-import traceback
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import requests
 
-# optional inspection of parquet schema on read failure
-try:
-    import pyarrow.parquet as pq
-    import pyarrow as pa
-except Exception:
-    pq = None
-    pa = None
-
 BASE_URL = "https://huggingface.co/datasets/piebro/deutsche-bahn-data/resolve/main/monthly_processed_data/data-{month}.parquet"
 ONLY_CATEGORIES = {"ICE", "IC"}
-MONTHS_BACK = 3
-MIN_SAMPLES_ROUTE = 20     # Mindestbeobachtungen für eine Route+Stunde-Quote
-MIN_SAMPLES_TRAIN = 30     # Mindestbeobachtungen für den Zugnummer-Fallback
+MONTHS_BACK = 2
+DAYS_WINDOW = 30
+MIN_SAMPLES_ROUTE = 8
+MIN_SAMPLES_TRAIN = 20
 OUTPUT_PATH = Path("delay_stats.json")
 
-# Startbahnhöfe, für die Route-Statistiken berechnet werden (identisch zur
-# STATIONS-Liste in der App). Ziel-Bahnhöfe werden dynamisch aus den Daten
-# übernommen, müssen hier nicht gelistet werden.
 ORIGIN_STATIONS = [
     "Bremen Hbf", "Osnabrück Hbf", "Hannover Hbf", "Hamburg Hbf", "Berlin Hbf",
     "Köln Hbf", "Frankfurt (Main) Hbf", "Stuttgart Hbf", "München Hbf",
@@ -55,7 +38,7 @@ ORIGIN_STATIONS = [
 ]
 
 NEEDED_COLUMNS = [
-    "station_name", "train_type", "train_line_ride_id",
+    "station_name", "train_type", "train_name", "train_line_ride_id",
     "train_line_station_num", "departure_planned_time", "arrival_planned_time",
     "delay_in_min", "is_canceled",
 ]
@@ -90,166 +73,73 @@ def load_month(month):
     path = download_month(month)
     if path is None:
         return None
-
-    # Versuche zuerst, nur benötigte Spalten zu lesen (schneller). Falls das
-    # fehlschlägt (Schema-Drift / fehlende Spalten), lese die ganze Datei und
-    # zeige die verfügbaren Spalten zur Diagnose an.
-    try:
-        if pq is not None:
-            try:
-                pf = pq.ParquetFile(path)
-                schema = pf.schema_arrow
-                available = set(schema.names)
-                to_read = [c for c in NEEDED_COLUMNS if c in available]
-            except Exception as e:
-                print("Fehler beim Inspektieren des Parquet-Schemas:", e)
-                pf = None
-                schema = None
-                available = set()
-                to_read = []
-
-            # Versuche, mit pyarrow.read_table zu lesen (andere Codepfade als
-            # der dataset Scanner, vermeidet FieldRef-Fehler). Fange gezielt
-            # ArrowInvalid und andere Fehler ab und mache Fallbacks.
-            try:
-                if to_read:
-                    print("Lese Parquet mit pyarrow.read_table, Spalten:", to_read)
-                    table = pq.read_table(path, columns=to_read)
-                else:
-                    print("Lese komplette Parquet-Datei mit pyarrow.read_table")
-                    table = pq.read_table(path)
-                df = table.to_pandas()
-            except Exception as e:
-                # Spezieller Umgang mit ArrowInvalid (FieldRef Mismatch)
-                is_arrow_invalid = False
-                if pa is not None:
-                    try:
-                        is_arrow_invalid = isinstance(e, pa.lib.ArrowInvalid)
-                    except Exception:
-                        # falls pa.lib nicht vorhanden oder hasattr Probleme
-                        is_arrow_invalid = False
-                if is_arrow_invalid:
-                    print("pyarrow.lib.ArrowInvalid beim Lesen mit pyarrow.read_table:", e)
-                    try:
-                        if pf is None:
-                            pf = pq.ParquetFile(path)
-                        print("Parquet schema:", pf.schema_arrow)
-                        print("Available columns:", list(pf.schema_arrow.names))
-                    except Exception as e2:
-                        print("Konnte Parquet-Schema nicht inspizieren:", e2)
-                    # zwingend kompletten Table lesen
-                    try:
-                        table = pq.read_table(path)
-                        df = table.to_pandas()
-                    except Exception as e3:
-                        print("Fehler beim vollständigen Lesen via pq.read_table:", e3)
-                        print("Versuche pandas.read_parquet ohne Spaltenauswahl als letzten Fallback...")
-                        df = pd.read_parquet(path)
-                else:
-                    # anderer Fehler: versuche pandas fallback
-                    print("Fehler beim Lesen mit pyarrow.read_table:", e)
-                    try:
-                        df = pd.read_parquet(path)
-                    except Exception as e2:
-                        print("Fehler beim pandas.read_parquet-Fallback:", e2)
-                        raise
-        else:
-            # pyarrow.parquet nicht verfügbar: vertraue auf pandas/pyarrow engine
-            try:
-                df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
-            except Exception as e:
-                print("Fehler beim Lesen mit ausgewählten Spalten:", e)
-                print("Lese komplette Datei als Fallback ...")
-                df = pd.read_parquet(path)
-    except Exception as e:
-        # Allgemeiner Fallback: zeige Fehler und re-raise, damit der Fehler im
-        # CI-Log sichtbar bleibt.
-        print("Fehler beim Lesen der Parquet-Datei:", e)
-        if pq is not None:
-            try:
-                pf = pq.ParquetFile(path)
-                schema = pf.schema_arrow
-                print("Parquet schema:", schema)
-                print("Available columns:", list(schema.names))
-            except Exception as e2:
-                print("Konnte Parquet-Schema nicht inspizieren:", e2)
-        else:
-            print("pyarrow.parquet nicht verfügbar, kann Schema nicht anzeigen.")
-        # Datei wegräumen und Fehler weitergeben
-        try:
-            path.unlink()
-        except Exception:
-            pass
-        raise
-
-    # Datei wegräumen
-    try:
-        path.unlink()
-    except Exception:
-        pass
-
-    # Filter nach Zugkategorien nur wenn die Spalte vorhanden ist.
-    if "train_type" in df.columns:
-        df = df[df["train_type"].isin(ONLY_CATEGORIES)]
-    else:
-        print("Hinweis: Spalte 'train_type' fehlt; Kategorie-Filter wird übersprungen.")
-
+    df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+    path.unlink()
+    df = df[df["train_type"].isin(ONLY_CATEGORIES)]
     return df
 
 
-def build_route_stats(all_df):
-    """Route+Stunde -> Quote, gemessen am tatsächlichen Zielhalt derselben Fahrt."""
+def matched_route_legs(all_df):
     origin_df = all_df[all_df["station_name"].isin(ORIGIN_STATIONS)].copy()
     origin_df = origin_df.dropna(subset=["departure_planned_time"])
-    origin_df["hour"] = pd.to_datetime(origin_df["departure_planned_time"]).dt.hour
+    origin_dt = pd.to_datetime(origin_df["departure_planned_time"])
+    origin_df["hour"] = origin_dt.dt.hour
+    origin_df["day"] = origin_dt.dt.date
     origin_df = origin_df[[
-        "train_line_ride_id", "train_line_station_num", "station_name", "hour",
-    ]].rename(columns={
-        "station_name": "origin_name",
-        "train_line_station_num": "origin_num",
-    })
+        "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day",
+    ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
 
     dest_df = all_df.dropna(subset=["station_name"]).copy()
-    dest_df["is_problem"] = dest_df["is_canceled"] | (dest_df["delay_in_min"] >= 20)
     dest_df = dest_df[[
-        "train_line_ride_id", "train_line_station_num", "station_name", "is_problem", "delay_in_min",
-    ]].rename(columns={
-        "station_name": "dest_name",
-        "train_line_station_num": "dest_num",
-    })
+        "train_line_ride_id", "train_line_station_num", "station_name", "delay_in_min", "is_canceled",
+    ]].rename(columns={"station_name": "dest_name", "train_line_station_num": "dest_num"})
 
     merged = origin_df.merge(dest_df, on="train_line_ride_id")
-    # nur Halte, die NACH dem Startbahnhof in derselben Fahrt kommen
     merged = merged[merged["dest_num"] > merged["origin_num"]]
+    return merged
 
-    grouped = (
-        merged.groupby(["origin_name", "dest_name", "hour"])
-        .agg(
-            samples=("is_problem", "size"),
-            problem_rate=("is_problem", "mean"),
-            avg_delay=("delay_in_min", "mean"),
-        )
-        .reset_index()
-    )
-    grouped = grouped[grouped["samples"] >= MIN_SAMPLES_ROUTE]
+
+def build_route_stats(all_df):
+    merged = matched_route_legs(all_df)
+    merged["is_problem"] = merged["is_canceled"] | (merged["delay_in_min"] >= 20)
+
+    cutoff = date.today() - timedelta(days=DAYS_WINDOW)
 
     routes = {}
-    for _, row in grouped.iterrows():
-        key = f"{row['origin_name']}|{row['dest_name']}|{int(row['hour'])}"
+    for (origin_name, dest_name, hour), grp in merged.groupby(["origin_name", "dest_name", "hour"]):
+        samples = len(grp)
+        if samples < MIN_SAMPLES_ROUTE:
+            continue
+
+        pct = round(float(grp["is_problem"].mean()) * 100, 1)
+        avg_delay = round(float(grp["delay_in_min"].mean()), 1)
+
+        recent = grp[grp["day"] >= cutoff].sort_values("day")
+        days = []
+        cancelled_count = 0
+        for _, row in recent.iterrows():
+            if bool(row["is_canceled"]):
+                cancelled_count += 1
+                days.append({"date": row["day"].isoformat(), "delay": None, "cancelled": True})
+            else:
+                days.append({"date": row["day"].isoformat(), "delay": int(row["delay_in_min"]), "cancelled": False})
+
+        key = f"{origin_name}|{dest_name}|{int(hour)}"
         routes[key] = {
-            "samples": int(row["samples"]),
-            "pct": round(float(row["problem_rate"]) * 100, 1),
-            "avgDelay": round(float(row["avg_delay"]), 1),
+            "samples": int(samples),
+            "pct": pct,
+            "avgDelay": avg_delay,
+            "cancelledCount": cancelled_count,
+            "days": days,
         }
     return routes
 
 
 def build_train_number_stats(all_df):
-    """Fallback: grobe Quote pro Zugkategorie, egal auf welcher Teilstrecke."""
     df = all_df.copy()
     df["is_problem"] = df["is_canceled"] | (df["delay_in_min"] >= 20)
     grouped = (
-        df.groupby(["train_type"])
+        df.groupby(["train_type", "train_name"])
         .agg(
             samples=("is_problem", "size"),
             problem_rate=("is_problem", "mean"),
@@ -261,7 +151,7 @@ def build_train_number_stats(all_df):
 
     trains = {}
     for _, row in grouped.iterrows():
-        key = f"{row['train_type']}"
+        key = f"{row['train_type']} {row['train_name']}"
         trains[key] = {
             "samples": int(row["samples"]),
             "pct": round(float(row["problem_rate"]) * 100, 1),
@@ -284,41 +174,21 @@ def main():
 
     all_df = pd.concat(frames, ignore_index=True)
 
-    # Prüfe, ob die erforderlichen Spalten vorhanden sind. Falls bestimmte
-    # Spalten fehlen, überspringe den jeweiligen Teil (routes/trains) statt zu
-    # crashen.
-    required_route_cols = {
-        "station_name", "train_line_ride_id", "train_line_station_num",
-        "departure_planned_time", "delay_in_min", "is_canceled",
-    }
-    required_train_cols = {"train_type", "delay_in_min", "is_canceled"}
-
-    routes = {}
-    trains = {}
-
-    if required_route_cols.issubset(set(all_df.columns)):
-        routes = build_route_stats(all_df)
-    else:
-        missing = required_route_cols - set(all_df.columns)
-        print(f"Warnung: fehlende Spalten für Route-Statistiken: {sorted(missing)} — routes werden übersprungen.")
-
-    if required_train_cols.issubset(set(all_df.columns)):
-        trains = build_train_number_stats(all_df)
-    else:
-        missing = required_train_cols - set(all_df.columns)
-        print(f"Warnung: fehlende Spalten für Zug-Statistiken: {sorted(missing)} — trains werden übersprungen.")
+    routes = build_route_stats(all_df)
+    trains = build_train_number_stats(all_df)
 
     output = {
         "generatedAt": date.today().isoformat(),
         "monthsIncluded": months,
+        "daysWindow": DAYS_WINDOW,
         "onlyCategories": sorted(ONLY_CATEGORIES),
         "minSamplesRoute": MIN_SAMPLES_ROUTE,
         "minSamplesTrain": MIN_SAMPLES_TRAIN,
         "note": (
             "pct = Anteil der Fahrten mit Ausfall oder >=20 Min Verspätung. "
             "'routes' misst die Verspätung am tatsächlichen Zielbahnhof derselben Fahrt, "
-            "gebündelt nach Startbahnhof, Zielbahnhof und Abfahrtsstunde. "
-            "'trains' ist ein gröberer Fallback pro Zugkategorie über alle Teilstrecken. "
+            "inkl. Tagesreihe 'days' der letzten 30 Tage für Goldpick-Charts. "
+            "'trains' ist ein gröberer Fallback pro Zugnummer über alle Teilstrecken. "
             "Echte historische Daten von Deutsche Bahn (CC BY 4.0) via "
             "huggingface.co/datasets/piebro/deutsche-bahn-data"
         ),
@@ -327,14 +197,8 @@ def main():
     }
 
     OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugkategorien in {OUTPUT_PATH}.")
+    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugnummern in {OUTPUT_PATH}.")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print("Unerwarteter Fehler im Skript:")
-        traceback.print_exc()
-        # Stelle sicher, dass CI den Fehler sieht
-        raise
+    main()
