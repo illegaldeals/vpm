@@ -195,6 +195,14 @@ def main():
     routes = build_route_stats(all_df)
     trains = build_train_number_stats(all_df)
 
+    # Sicherung: eine (fast) leere Datei würde stillschweigend gute alte Daten
+    # überschreiben. Lieber der Job schlägt sichtbar fehl, als dass die App
+    # danach plötzlich "0 Startbahnhöfe" zeigt.
+    if len(routes) < 50 or len(trains) < 20:
+        print(f"WARNUNG: nur {len(routes)} Routen / {len(trains)} Zugnummern gefunden — das ist verdächtig wenig.")
+        print("Breche ab, ohne delay_stats.json zu überschreiben. Prüfe Spaltennamen/Stationsnamen im Datenset.")
+        sys.exit(1)
+
     output = {
         "generatedAt": date.today().isoformat(),
         "monthsIncluded": months,
