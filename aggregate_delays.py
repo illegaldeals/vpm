@@ -23,6 +23,7 @@ Nutzung:
 
 import json
 import sys
+import traceback
 from datetime import date
 from pathlib import Path
 
@@ -35,6 +36,7 @@ try:
     import pyarrow as pa
 except Exception:
     pq = None
+    pa = None
 
 BASE_URL = "https://huggingface.co/datasets/piebro/deutsche-bahn-data/resolve/main/monthly_processed_data/data-{month}.parquet"
 ONLY_CATEGORIES = {"ICE", "IC"}
@@ -99,36 +101,58 @@ def load_month(month):
                 schema = pf.schema_arrow
                 available = set(schema.names)
                 to_read = [c for c in NEEDED_COLUMNS if c in available]
+            except Exception as e:
+                print("Fehler beim Inspektieren des Parquet-Schemas:", e)
+                pf = None
+                schema = None
+                available = set()
+                to_read = []
 
-                # Verwende pyarrow.read_table statt pandas.read_parquet, um die
-                # pyarrow.dataset Scanner / FieldRef-Probleme zu umgehen.
+            # Versuche, mit pyarrow.read_table zu lesen (andere Codepfade als
+            # der dataset Scanner, vermeidet FieldRef-Fehler). Fange gezielt
+            # ArrowInvalid und andere Fehler ab und mache Fallbacks.
+            try:
                 if to_read:
-                    try:
-                        table = pq.read_table(path, columns=to_read)
-                        df = table.to_pandas()
-                    except Exception as e:
-                        print("Fehler beim pq.read_table mit Spalten, versuche pandas.read_parquet als Fallback:", e)
-                        df = pd.read_parquet(path, columns=to_read)
+                    print("Lese Parquet mit pyarrow.read_table, Spalten:", to_read)
+                    table = pq.read_table(path, columns=to_read)
                 else:
-                    print("Keine der benötigten Spalten im Parquet-Schema vorhanden; lese komplette Datei.")
-                    print("Parquet schema:", schema)
-                    print("Available columns:", list(schema.names))
+                    print("Lese komplette Parquet-Datei mit pyarrow.read_table")
+                    table = pq.read_table(path)
+                df = table.to_pandas()
+            except Exception as e:
+                # Spezieller Umgang mit ArrowInvalid (FieldRef Mismatch)
+                is_arrow_invalid = False
+                if pa is not None:
+                    try:
+                        is_arrow_invalid = isinstance(e, pa.lib.ArrowInvalid)
+                    except Exception:
+                        # falls pa.lib nicht vorhanden oder hasattr Probleme
+                        is_arrow_invalid = False
+                if is_arrow_invalid:
+                    print("pyarrow.lib.ArrowInvalid beim Lesen mit pyarrow.read_table:", e)
+                    try:
+                        if pf is None:
+                            pf = pq.ParquetFile(path)
+                        print("Parquet schema:", pf.schema_arrow)
+                        print("Available columns:", list(pf.schema_arrow.names))
+                    except Exception as e2:
+                        print("Konnte Parquet-Schema nicht inspizieren:", e2)
+                    # zwingend kompletten Table lesen
                     try:
                         table = pq.read_table(path)
                         df = table.to_pandas()
-                    except Exception as e:
-                        print("Fehler beim pq.read_table ohne Spaltenauswahl, versuche pandas.read_parquet als Fallback:", e)
+                    except Exception as e3:
+                        print("Fehler beim vollständigen Lesen via pq.read_table:", e3)
+                        print("Versuche pandas.read_parquet ohne Spaltenauswahl als letzten Fallback...")
                         df = pd.read_parquet(path)
-            except Exception as e:
-                # Falls Schema-Inspektion fehlschlägt, fallback auf pandas
-                print("Fehler beim Inspektieren des Parquet-Schemas:", e)
-                print("Versuche, mit ausgewählten Spalten zu lesen...")
-                try:
-                    df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
-                except Exception as e2:
-                    print("Fehler beim Lesen mit ausgewählten Spalten:", e2)
-                    print("Lese komplette Datei als Fallback ...")
-                    df = pd.read_parquet(path)
+                else:
+                    # anderer Fehler: versuche pandas fallback
+                    print("Fehler beim Lesen mit pyarrow.read_table:", e)
+                    try:
+                        df = pd.read_parquet(path)
+                    except Exception as e2:
+                        print("Fehler beim pandas.read_parquet-Fallback:", e2)
+                        raise
         else:
             # pyarrow.parquet nicht verfügbar: vertraue auf pandas/pyarrow engine
             try:
@@ -159,7 +183,10 @@ def load_month(month):
         raise
 
     # Datei wegräumen
-    path.unlink()
+    try:
+        path.unlink()
+    except Exception:
+        pass
 
     # Filter nach Zugkategorien nur wenn die Spalte vorhanden ist.
     if "train_type" in df.columns:
@@ -304,4 +331,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("Unerwarteter Fehler im Skript:")
+        traceback.print_exc()
+        # Stelle sicher, dass CI den Fehler sieht
+        raise
