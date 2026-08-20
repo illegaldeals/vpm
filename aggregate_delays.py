@@ -34,7 +34,7 @@ BASE_URL = "https://huggingface.co/datasets/piebro/deutsche-bahn-data/resolve/ma
 ONLY_CATEGORIES = {"ICE", "IC"}
 MONTHS_BACK = 2
 DAYS_WINDOW = 30
-MIN_SAMPLES_ROUTE = 8
+MIN_SAMPLES_ROUTE = 15
 MIN_SAMPLES_TRAIN = 20
 OUTPUT_PATH = Path("delay_stats.json")
 
@@ -133,14 +133,19 @@ def build_route_stats(all_df):
         avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
 
         recent = grp[grp["day"] >= cutoff].sort_values("day")
-        days = []
-        cancelled_count = 0
-        for _, row in recent.iterrows():
-            if bool(row["is_canceled"]):
-                cancelled_count += 1
-                days.append({"date": row["day"].isoformat(), "delay": None, "cancelled": True})
-            else:
-                days.append({"date": row["day"].isoformat(), "delay": int(row["arrival_delay_min"]), "cancelled": False})
+        cancelled_count = int(recent["is_canceled"].sum())
+
+        # Tagesreihe ist teuer (viele Zeilen JSON) — nur für Routen aufheben,
+        # die überhaupt als Goldpick infrage kommen. Das hält die Datei klein
+        # genug für GitHub (Limit: 100 MB).
+        days = None
+        if avg_delay >= 10 or pct >= 20:
+            days = []
+            for _, row in recent.iterrows():
+                if bool(row["is_canceled"]):
+                    days.append({"date": row["day"].isoformat(), "delay": None, "cancelled": True})
+                else:
+                    days.append({"date": row["day"].isoformat(), "delay": int(row["arrival_delay_min"]), "cancelled": False})
 
         key = f"{origin_name}|{dest_name}|{int(hour)}"
         routes[key] = {
@@ -222,8 +227,16 @@ def main():
         "trains": trains,
     }
 
-    OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugnummern in {OUTPUT_PATH}.")
+    OUTPUT_PATH.write_text(
+        json.dumps(output, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    size_mb = OUTPUT_PATH.stat().st_size / (1024 * 1024)
+    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugnummern in {OUTPUT_PATH} ({size_mb:.1f} MB).")
+    if size_mb > 90:
+        print("WARNUNG: Datei ist nahe am GitHub-Limit von 100 MB — Push könnte fehlschlagen.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
