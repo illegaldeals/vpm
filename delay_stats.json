@@ -1,0 +1,17 @@
+{
+  "generatedAt": "2026-08-20",
+  "monthsIncluded": [
+    "2026-07",
+    "2026-06",
+    "2026-05"
+  ],
+  "onlyCategories": [
+    "IC",
+    "ICE"
+  ],
+  "minSamplesRoute": 20,
+  "minSamplesTrain": 30,
+  "note": "pct = Anteil der Fahrten mit Ausfall oder >=20 Min Verspätung. 'routes' misst die Verspätung am tatsächlichen Zielbahnhof derselben Fahrt, gebündelt nach Startbahnhof, Zielbahnhof und Abfahrtsstunde. 'trains' ist ein gröberer Fallback pro Zugkategorie über alle Teilstrecken. Echte historische Daten von Deutsche Bahn (CC BY 4.0) via huggingface.co/datasets/piebro/deutsche-bahn-data",
+  "routes": {},
+  "trains": {}
+}
