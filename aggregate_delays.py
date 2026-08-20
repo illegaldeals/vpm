@@ -29,6 +29,12 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+# optional inspection of parquet schema on read failure
+try:
+    import pyarrow.parquet as pq
+except Exception:
+    pq = None
+
 BASE_URL = "https://huggingface.co/datasets/piebro/deutsche-bahn-data/resolve/main/monthly_processed_data/data-{month}.parquet"
 ONLY_CATEGORIES = {"ICE", "IC"}
 MONTHS_BACK = 3
@@ -81,9 +87,36 @@ def load_month(month):
     path = download_month(month)
     if path is None:
         return None
-    df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+
+    # Versuche zuerst, nur benötigte Spalten zu lesen (schneller). Falls das
+    # fehlschlägt (Schema-Drift / fehlende Spalten), lese die ganze Datei und
+    # zeige die verfügbaren Spalten zur Diagnose an.
+    try:
+        df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+    except Exception as e:
+        print("Fehler beim Lesen mit ausgewählten Spalten:", e)
+        if pq is not None:
+            try:
+                pf = pq.ParquetFile(path)
+                schema = pf.schema_arrow
+                print("Parquet schema:", schema)
+                print("Available columns:", list(schema.names))
+            except Exception as e2:
+                print("Konnte Parquet-Schema nicht inspizieren:", e2)
+        else:
+            print("pyarrow.parquet nicht verfügbar, kann Schema nicht anzeigen.")
+        print("Lese komplette Datei als Fallback ...")
+        df = pd.read_parquet(path)
+
+    # Datei wegräumen
     path.unlink()
-    df = df[df["train_type"].isin(ONLY_CATEGORIES)]
+
+    # Filter nach Zugkategorien nur wenn die Spalte vorhanden ist.
+    if "train_type" in df.columns:
+        df = df[df["train_type"].isin(ONLY_CATEGORIES)]
+    else:
+        print("Hinweis: Spalte 'train_type' fehlt; Kategorie-Filter wird übersprungen.")
+
     return df
 
 
@@ -174,8 +207,29 @@ def main():
 
     all_df = pd.concat(frames, ignore_index=True)
 
-    routes = build_route_stats(all_df)
-    trains = build_train_number_stats(all_df)
+    # Prüfe, ob die erforderlichen Spalten vorhanden sind. Falls bestimmte
+    # Spalten fehlen, überspringe den jeweiligen Teil (routes/trains) statt zu
+    # crashen.
+    required_route_cols = {
+        "station_name", "train_line_ride_id", "train_line_station_num",
+        "departure_planned_time", "delay_in_min", "is_canceled",
+    }
+    required_train_cols = {"train_type", "train_name", "delay_in_min", "is_canceled"}
+
+    routes = {}
+    trains = {}
+
+    if required_route_cols.issubset(set(all_df.columns)):
+        routes = build_route_stats(all_df)
+    else:
+        missing = required_route_cols - set(all_df.columns)
+        print(f"Warnung: fehlende Spalten für Route-Statistiken: {sorted(missing)} — routes werden übersprungen.")
+
+    if required_train_cols.issubset(set(all_df.columns)):
+        trains = build_train_number_stats(all_df)
+    else:
+        missing = required_train_cols - set(all_df.columns)
+        print(f"Warnung: fehlende Spalten für Zug-Statistiken: {sorted(missing)} — trains werden übersprungen.")
 
     output = {
         "generatedAt": date.today().isoformat(),
