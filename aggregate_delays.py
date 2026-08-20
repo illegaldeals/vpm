@@ -43,6 +43,10 @@ ORIGIN_STATIONS = [
     "Köln Hbf", "Frankfurt (Main) Hbf", "Stuttgart Hbf", "München Hbf",
     "Leipzig Hbf", "Dresden Hbf", "Düsseldorf Hbf",
 ]
+# Ziele werden auf dieselbe Liste großer Hauptbahnhöfe beschränkt — sonst
+# entstehen tausende Kombinationen mit kleinen/seltenen Zielbahnhöfen, die
+# die Datei unnötig aufblähen und praktisch kaum gesucht werden.
+DEST_STATIONS = set(ORIGIN_STATIONS)
 
 NEEDED_COLUMNS = [
     "station_name", "train_type", "train_number", "line_number",
@@ -106,7 +110,7 @@ def matched_route_legs(all_df):
         "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day",
     ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
 
-    dest_df = all_df.dropna(subset=["station_name"]).copy()
+    dest_df = all_df[all_df["station_name"].isin(DEST_STATIONS)].copy()
     dest_df = dest_df[[
         "train_line_ride_id", "train_line_station_num", "station_name",
         "arrival_delay_min", "is_canceled",
