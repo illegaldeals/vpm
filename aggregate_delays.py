@@ -6,9 +6,16 @@ Lädt echte DB-Verspätungsdaten von HuggingFace (piebro/deutsche-bahn-data,
 CC BY 4.0) und berechnet pro Route (Start -> Ziel, gebündelt nach
 Abfahrtsstunde):
     - Gesamt-Kennzahlen: samples, pct (Anteil >=20 Min oder Ausfall), avgDelay
-    - "days": Tagesreihe der letzten 30 Tage mit Verspätung in Min pro Tag
-      (null wenn ausgefallen, fehlt der Tag ganz wenn keine Fahrt vorlag)
+    - "days": Tagesreihe der letzten 30 Tage (Verspätung in Min pro Tag)
     - cancelledCount: Anzahl (Teil-)Ausfälle in den letzten 30 Tagen
+
+Spaltenschema (Stand: bestätigt live via GitHub-Actions-Fehlermeldung, 2026-08):
+    station_name, xml_station_name, eva, train_number, line_number,
+    final_destination_station, delay_in_min, time,
+    arrival_is_canceled, departure_is_canceled, train_type,
+    train_line_ride_id, train_line_station_num,
+    arrival_planned_time, arrival_change_time,
+    departure_planned_time, departure_change_time, id
 
 Nutzung:
     pip install pandas pyarrow requests
@@ -38,9 +45,11 @@ ORIGIN_STATIONS = [
 ]
 
 NEEDED_COLUMNS = [
-    "station_name", "train_type", "train_name", "train_line_ride_id",
-    "train_line_station_num", "departure_planned_time", "arrival_planned_time",
-    "delay_in_min", "is_canceled",
+    "station_name", "train_type", "train_number", "line_number",
+    "train_line_ride_id", "train_line_station_num",
+    "departure_planned_time", "departure_change_time",
+    "arrival_planned_time", "arrival_change_time",
+    "arrival_is_canceled", "departure_is_canceled",
 ]
 
 
@@ -76,22 +85,31 @@ def load_month(month):
     df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
     path.unlink()
     df = df[df["train_type"].isin(ONLY_CATEGORIES)]
+
+    df["arrival_delay_min"] = (
+        (df["arrival_change_time"] - df["arrival_planned_time"]).dt.total_seconds() / 60
+    ).fillna(0).round().astype(int)
+    df["departure_delay_min"] = (
+        (df["departure_change_time"] - df["departure_planned_time"]).dt.total_seconds() / 60
+    ).fillna(0).round().astype(int)
+    df["is_canceled"] = df["arrival_is_canceled"].fillna(False) | df["departure_is_canceled"].fillna(False)
+
     return df
 
 
 def matched_route_legs(all_df):
     origin_df = all_df[all_df["station_name"].isin(ORIGIN_STATIONS)].copy()
     origin_df = origin_df.dropna(subset=["departure_planned_time"])
-    origin_dt = pd.to_datetime(origin_df["departure_planned_time"])
-    origin_df["hour"] = origin_dt.dt.hour
-    origin_df["day"] = origin_dt.dt.date
+    origin_df["hour"] = origin_df["departure_planned_time"].dt.hour
+    origin_df["day"] = origin_df["departure_planned_time"].dt.date
     origin_df = origin_df[[
         "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day",
     ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
 
     dest_df = all_df.dropna(subset=["station_name"]).copy()
     dest_df = dest_df[[
-        "train_line_ride_id", "train_line_station_num", "station_name", "delay_in_min", "is_canceled",
+        "train_line_ride_id", "train_line_station_num", "station_name",
+        "arrival_delay_min", "is_canceled",
     ]].rename(columns={"station_name": "dest_name", "train_line_station_num": "dest_num"})
 
     merged = origin_df.merge(dest_df, on="train_line_ride_id")
@@ -101,7 +119,7 @@ def matched_route_legs(all_df):
 
 def build_route_stats(all_df):
     merged = matched_route_legs(all_df)
-    merged["is_problem"] = merged["is_canceled"] | (merged["delay_in_min"] >= 20)
+    merged["is_problem"] = merged["is_canceled"] | (merged["arrival_delay_min"] >= 20)
 
     cutoff = date.today() - timedelta(days=DAYS_WINDOW)
 
@@ -112,7 +130,7 @@ def build_route_stats(all_df):
             continue
 
         pct = round(float(grp["is_problem"].mean()) * 100, 1)
-        avg_delay = round(float(grp["delay_in_min"].mean()), 1)
+        avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
 
         recent = grp[grp["day"] >= cutoff].sort_values("day")
         days = []
@@ -122,7 +140,7 @@ def build_route_stats(all_df):
                 cancelled_count += 1
                 days.append({"date": row["day"].isoformat(), "delay": None, "cancelled": True})
             else:
-                days.append({"date": row["day"].isoformat(), "delay": int(row["delay_in_min"]), "cancelled": False})
+                days.append({"date": row["day"].isoformat(), "delay": int(row["arrival_delay_min"]), "cancelled": False})
 
         key = f"{origin_name}|{dest_name}|{int(hour)}"
         routes[key] = {
@@ -137,13 +155,13 @@ def build_route_stats(all_df):
 
 def build_train_number_stats(all_df):
     df = all_df.copy()
-    df["is_problem"] = df["is_canceled"] | (df["delay_in_min"] >= 20)
+    df["is_problem"] = df["is_canceled"] | (df["arrival_delay_min"] >= 20)
     grouped = (
-        df.groupby(["train_type", "train_name"])
+        df.groupby(["train_type", "train_number"])
         .agg(
             samples=("is_problem", "size"),
             problem_rate=("is_problem", "mean"),
-            avg_delay=("delay_in_min", "mean"),
+            avg_delay=("arrival_delay_min", "mean"),
         )
         .reset_index()
     )
@@ -151,7 +169,7 @@ def build_train_number_stats(all_df):
 
     trains = {}
     for _, row in grouped.iterrows():
-        key = f"{row['train_type']} {row['train_name']}"
+        key = f"{row['train_type']} {row['train_number']}"
         trains[key] = {
             "samples": int(row["samples"]),
             "pct": round(float(row["problem_rate"]) * 100, 1),
@@ -185,7 +203,7 @@ def main():
         "minSamplesRoute": MIN_SAMPLES_ROUTE,
         "minSamplesTrain": MIN_SAMPLES_TRAIN,
         "note": (
-            "pct = Anteil der Fahrten mit Ausfall oder >=20 Min Verspätung. "
+            "pct = Anteil der Fahrten mit Ausfall oder >=20 Min Ankunftsverspätung. "
             "'routes' misst die Verspätung am tatsächlichen Zielbahnhof derselben Fahrt, "
             "inkl. Tagesreihe 'days' der letzten 30 Tage für Goldpick-Charts. "
             "'trains' ist ein gröberer Fallback pro Zugnummer über alle Teilstrecken. "
