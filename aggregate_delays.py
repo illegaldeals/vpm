@@ -105,6 +105,11 @@ def load_month(month):
         (df["departure_change_time"] - df["departure_planned_time"]).dt.total_seconds() / 60
     ).fillna(0).round().astype(int)
     df["is_canceled"] = df["arrival_is_canceled"].fillna(False) | df["departure_is_canceled"].fillna(False)
+
+    berlin_variants = sorted(df.loc[df["station_name"].str.contains("erlin", na=False), "station_name"].unique())
+    if berlin_variants:
+        print(f"  Gefundene Berlin-Schreibweisen in {month}: {berlin_variants}")
+
     df["station_name"] = df["station_name"].replace(STATION_NAME_ALIASES)
 
     return df
@@ -115,15 +120,21 @@ def matched_route_legs(all_df):
     origin_df = origin_df.dropna(subset=["departure_planned_time"])
     origin_df["hour"] = origin_df["departure_planned_time"].dt.hour
     origin_df["day"] = origin_df["departure_planned_time"].dt.date
+    origin_df["time_str"] = origin_df["departure_planned_time"].dt.strftime("%H:%M")
     origin_df = origin_df[[
-        "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day",
+        "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day", "time_str",
     ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
+    # Das Datenset wird per Snapshot-Polling erzeugt — derselbe Halt kann
+    # mehrfach auftauchen (aus verschiedenen Abfragen). Pro Fahrt+Bahnhof nur
+    # eine Zeile behalten, sonst tauchen Tage im Chart mehrfach identisch auf.
+    origin_df = origin_df.drop_duplicates(subset=["train_line_ride_id", "origin_name"])
 
     dest_df = all_df[all_df["station_name"].isin(DEST_STATIONS)].copy()
     dest_df = dest_df[[
         "train_line_ride_id", "train_line_station_num", "station_name",
         "arrival_delay_min", "is_canceled",
     ]].rename(columns={"station_name": "dest_name", "train_line_station_num": "dest_num"})
+    dest_df = dest_df.drop_duplicates(subset=["train_line_ride_id", "dest_name"], keep="last")
 
     merged = origin_df.merge(dest_df, on="train_line_ride_id")
     merged = merged[merged["dest_num"] > merged["origin_num"]]
@@ -144,8 +155,9 @@ def build_route_stats(all_df):
 
         pct = round(float(grp["is_problem"].mean()) * 100, 1)
         avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
+        typical_time = grp["time_str"].mode().iloc[0] if not grp["time_str"].mode().empty else f"{int(hour):02d}:00"
 
-        recent = grp[grp["day"] >= cutoff].sort_values("day")
+        recent = grp[grp["day"] >= cutoff].drop_duplicates(subset=["day"], keep="last").sort_values("day")
         cancelled_count = int(recent["is_canceled"].sum())
 
         # Tagesreihe ist teuer (viele Zeilen JSON) — nur für Routen aufheben,
@@ -165,6 +177,7 @@ def build_route_stats(all_df):
             "samples": int(samples),
             "pct": pct,
             "avgDelay": avg_delay,
+            "typicalTime": typical_time,
             "cancelledCount": cancelled_count,
             "days": days,
         }
