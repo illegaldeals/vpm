@@ -92,9 +92,48 @@ def load_month(month):
     # fehlschlägt (Schema-Drift / fehlende Spalten), lese die ganze Datei und
     # zeige die verfügbaren Spalten zur Diagnose an.
     try:
-        df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+        # Wenn pyarrow.parquet verfügbar ist, inspiziere das Schema zuerst und
+        # wähle nur die Spalten aus, die tatsächlich vorhanden sind. Das
+        # vermeidet Fehler aus dem pyarrow.dataset Scanner, wenn Spaltennamen
+        # im Parquet-Schema fehlen oder anders benannt sind.
+        if pq is not None:
+            try:
+                pf = pq.ParquetFile(path)
+                schema = pf.schema_arrow
+                available = set(schema.names)
+                to_read = [c for c in NEEDED_COLUMNS if c in available]
+                if to_read:
+                    df = pd.read_parquet(path, columns=to_read)
+                else:
+                    print("Keine der benötigten Spalten im Parquet-Schema vorhanden; lese komplette Datei.")
+                    print("Parquet schema:", schema)
+                    print("Available columns:", list(schema.names))
+                    df = pd.read_parquet(path)
+            except Exception as e:
+                # Falls Schema-Inspektion fehlschlägt, falle zurück auf den
+                # bisherigen Ansatz: versuche mit ausgewählten Spalten zu lesen
+                # und fange Fehler ab.
+                print("Fehler beim Inspektieren des Parquet-Schemas:", e)
+                print("Versuche, mit ausgewählten Spalten zu lesen...")
+                try:
+                    df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+                except Exception as e2:
+                    print("Fehler beim Lesen mit ausgewählten Spalten:", e2)
+                    print("Lese komplette Datei als Fallback ...")
+                    df = pd.read_parquet(path)
+        else:
+            # pyarrow.parquet nicht verfügbar: vertraue auf pandas/pyarrow engine
+            try:
+                df = pd.read_parquet(path, columns=NEEDED_COLUMNS)
+            except Exception as e:
+                print("Fehler beim Lesen mit ausgewählten Spalten:", e)
+                print("Lese komplette Datei als Fallback ...")
+                df = pd.read_parquet(path)
     except Exception as e:
-        print("Fehler beim Lesen mit ausgewählten Spalten:", e)
+        # Allgemeiner Fallback: zeige Fehler und re-raise, damit der Fehler im
+        # CI-Log sichtbar bleibt. (Falls notwendig kann man hier weiter
+        # robustere Behandlung einbauen.)
+        print("Fehler beim Lesen der Parquet-Datei:", e)
         if pq is not None:
             try:
                 pf = pq.ParquetFile(path)
@@ -105,8 +144,12 @@ def load_month(month):
                 print("Konnte Parquet-Schema nicht inspizieren:", e2)
         else:
             print("pyarrow.parquet nicht verfügbar, kann Schema nicht anzeigen.")
-        print("Lese komplette Datei als Fallback ...")
-        df = pd.read_parquet(path)
+        # Datei wegräumen und Fehler weitergeben
+        try:
+            path.unlink()
+        except Exception:
+            pass
+        raise
 
     # Datei wegräumen
     path.unlink()
