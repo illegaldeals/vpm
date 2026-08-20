@@ -14,7 +14,7 @@ gemittelt), gematcht über die Fahrt-ID (train_line_ride_id) und die
 Reihenfolge der Halte (train_line_station_num).
 
 Zusätzlich (als Fallback für Fälle ohne genug Route-Daten): dieselbe Quote
-grob pro Zugkategorie+Nummer, unabhängig von der genauen Route.
+grob pro Zugkategorie, unabhängig von der genauen Route.
 
 Nutzung:
     pip install pandas pyarrow requests
@@ -52,7 +52,7 @@ ORIGIN_STATIONS = [
 ]
 
 NEEDED_COLUMNS = [
-    "station_name", "train_type", "train_name", "train_line_ride_id",
+    "station_name", "train_type", "train_line_ride_id",
     "train_line_station_num", "departure_planned_time", "arrival_planned_time",
     "delay_in_min", "is_canceled",
 ]
@@ -168,11 +168,11 @@ def build_route_stats(all_df):
 
 
 def build_train_number_stats(all_df):
-    """Fallback: grobe Quote pro Zugkategorie+Nummer, egal auf welcher Teilstrecke."""
+    """Fallback: grobe Quote pro Zugkategorie, egal auf welcher Teilstrecke."""
     df = all_df.copy()
     df["is_problem"] = df["is_canceled"] | (df["delay_in_min"] >= 20)
     grouped = (
-        df.groupby(["train_type", "train_name"])
+        df.groupby(["train_type"])
         .agg(
             samples=("is_problem", "size"),
             problem_rate=("is_problem", "mean"),
@@ -184,7 +184,7 @@ def build_train_number_stats(all_df):
 
     trains = {}
     for _, row in grouped.iterrows():
-        key = f"{row['train_type']} {row['train_name']}"
+        key = f"{row['train_type']}"
         trains[key] = {
             "samples": int(row["samples"]),
             "pct": round(float(row["problem_rate"]) * 100, 1),
@@ -214,7 +214,7 @@ def main():
         "station_name", "train_line_ride_id", "train_line_station_num",
         "departure_planned_time", "delay_in_min", "is_canceled",
     }
-    required_train_cols = {"train_type", "train_name", "delay_in_min", "is_canceled"}
+    required_train_cols = {"train_type", "delay_in_min", "is_canceled"}
 
     routes = {}
     trains = {}
@@ -241,7 +241,7 @@ def main():
             "pct = Anteil der Fahrten mit Ausfall oder >=20 Min Verspätung. "
             "'routes' misst die Verspätung am tatsächlichen Zielbahnhof derselben Fahrt, "
             "gebündelt nach Startbahnhof, Zielbahnhof und Abfahrtsstunde. "
-            "'trains' ist ein gröberer Fallback pro Zugnummer über alle Teilstrecken. "
+            "'trains' ist ein gröberer Fallback pro Zugkategorie über alle Teilstrecken. "
             "Echte historische Daten von Deutsche Bahn (CC BY 4.0) via "
             "huggingface.co/datasets/piebro/deutsche-bahn-data"
         ),
@@ -250,7 +250,7 @@ def main():
     }
 
     OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugnummern in {OUTPUT_PATH}.")
+    print(f"Fertig: {len(routes)} Route+Stunde-Kombinationen, {len(trains)} Zugkategorien in {OUTPUT_PATH}.")
 
 
 if __name__ == "__main__":
