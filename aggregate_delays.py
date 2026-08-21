@@ -148,21 +148,20 @@ def build_route_stats(all_df):
     cutoff = date.today() - timedelta(days=DAYS_WINDOW)
 
     routes = {}
-    for (origin_name, dest_name, hour), grp in merged.groupby(["origin_name", "dest_name", "hour"]):
+    # Gruppierung nach EXAKTER Abfahrtszeit (nicht nur Stunde) — sonst werden auf
+    # belebten Strecken mehrere verschiedene Züge derselben Stunde vermischt,
+    # was zu falschen "ca."-Zeiten und mehreren Balken pro Tag im Chart führt.
+    for (origin_name, dest_name, time_str), grp in merged.groupby(["origin_name", "dest_name", "time_str"]):
         samples = len(grp)
         if samples < MIN_SAMPLES_ROUTE:
             continue
 
         pct = round(float(grp["is_problem"].mean()) * 100, 1)
         avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
-        typical_time = grp["time_str"].mode().iloc[0] if not grp["time_str"].mode().empty else f"{int(hour):02d}:00"
 
         recent = grp[grp["day"] >= cutoff].drop_duplicates(subset=["day"], keep="last").sort_values("day")
         cancelled_count = int(recent["is_canceled"].sum())
 
-        # Tagesreihe ist teuer (viele Zeilen JSON) — nur für Routen aufheben,
-        # die überhaupt als Goldpick infrage kommen. Das hält die Datei klein
-        # genug für GitHub (Limit: 100 MB).
         days = None
         if avg_delay >= 10 or pct >= 20:
             days = []
@@ -172,12 +171,12 @@ def build_route_stats(all_df):
                 else:
                     days.append({"date": row["day"].isoformat(), "delay": int(row["arrival_delay_min"]), "cancelled": False})
 
-        key = f"{origin_name}|{dest_name}|{int(hour)}"
+        key = f"{origin_name}|{dest_name}|{time_str}"
         routes[key] = {
             "samples": int(samples),
             "pct": pct,
             "avgDelay": avg_delay,
-            "typicalTime": typical_time,
+            "typicalTime": time_str,
             "cancelledCount": cancelled_count,
             "days": days,
         }
