@@ -164,10 +164,11 @@ def build_route_stats(all_df):
     routes = {}
     total_groups = 0
     kept_groups = 0
-    # Gruppierung nach EXAKTER Abfahrtszeit (nicht nur Stunde) — sonst werden auf
-    # belebten Strecken mehrere verschiedene Züge derselben Stunde vermischt,
-    # was zu falschen "ca."-Zeiten und mehreren Balken pro Tag im Chart führt.
-    for (origin_name, dest_name, time_str), grp in merged.groupby(["origin_name", "dest_name", "time_str"]):
+    # Stunden-Gruppierung (nicht exakte Minute) — direkte Verbindungen zwischen
+    # zwei großen Bahnhöfen ohne Umstieg sind seltener als gedacht, exakte
+    # Minute wäre zu fein für genug Stichprobengröße. Mehrere Züge derselben
+    # Stunde werden im Tages-Chart pro Kalendertag gemittelt (ein Balken/Tag).
+    for (origin_name, dest_name, hour), grp in merged.groupby(["origin_name", "dest_name", "hour"]):
         total_groups += 1
         samples = len(grp)
         if samples < MIN_SAMPLES_ROUTE:
@@ -176,25 +177,30 @@ def build_route_stats(all_df):
 
         pct = round(float(grp["is_problem"].mean()) * 100, 1)
         avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
+        typical_time = grp["time_str"].mode().iloc[0] if not grp["time_str"].mode().empty else f"{int(hour):02d}:00"
 
-        recent = grp[grp["day"] >= cutoff].drop_duplicates(subset=["day"], keep="last").sort_values("day")
-        cancelled_count = int(recent["is_canceled"].sum())
-
+        recent = grp[grp["day"] >= cutoff]
+        cancelled_count = 0
         days = None
         if avg_delay >= 10 or pct >= 20:
             days = []
-            for _, row in recent.iterrows():
-                if bool(row["is_canceled"]):
-                    days.append({"date": row["day"].isoformat(), "delay": None, "cancelled": True})
+            for day_value, day_grp in recent.groupby("day"):
+                day_cancelled = bool(day_grp["is_canceled"].any())
+                if day_cancelled:
+                    cancelled_count += 1
+                    days.append({"date": day_value.isoformat(), "delay": None, "cancelled": True})
                 else:
-                    days.append({"date": row["day"].isoformat(), "delay": int(row["arrival_delay_min"]), "cancelled": False})
+                    days.append({"date": day_value.isoformat(), "delay": round(float(day_grp["arrival_delay_min"].mean())), "cancelled": False})
+            days.sort(key=lambda d: d["date"])
+        else:
+            cancelled_count = int(recent.groupby("day")["is_canceled"].any().sum())
 
-        key = f"{origin_name}|{dest_name}|{time_str}"
+        key = f"{origin_name}|{dest_name}|{int(hour)}"
         routes[key] = {
             "samples": int(samples),
             "pct": pct,
             "avgDelay": avg_delay,
-            "typicalTime": time_str,
+            "typicalTime": typical_time,
             "cancelledCount": cancelled_count,
             "days": days,
         }
