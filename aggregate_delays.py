@@ -127,27 +127,31 @@ def load_month(month):
 
 def matched_route_legs(all_df):
     origin_df = all_df[all_df["station_name"].isin(ORIGIN_STATIONS)].copy()
+    print(f"    origin_df nach Stationsfilter: {len(origin_df)} Zeilen")
     origin_df = origin_df.dropna(subset=["departure_planned_time"])
+    print(f"    origin_df nach dropna(departure_planned_time): {len(origin_df)} Zeilen")
     origin_df["hour"] = origin_df["departure_planned_time"].dt.hour
     origin_df["day"] = origin_df["departure_planned_time"].dt.date
     origin_df["time_str"] = origin_df["departure_planned_time"].dt.strftime("%H:%M")
     origin_df = origin_df[[
         "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day", "time_str",
     ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
-    # Das Datenset wird per Snapshot-Polling erzeugt — derselbe Halt kann
-    # mehrfach auftauchen (aus verschiedenen Abfragen). Pro Fahrt+Bahnhof nur
-    # eine Zeile behalten, sonst tauchen Tage im Chart mehrfach identisch auf.
     origin_df = origin_df.drop_duplicates(subset=["train_line_ride_id", "origin_name"])
+    print(f"    origin_df nach Dedup: {len(origin_df)} Zeilen")
 
     dest_df = all_df[all_df["station_name"].isin(DEST_STATIONS)].copy()
+    print(f"    dest_df nach Stationsfilter: {len(dest_df)} Zeilen")
     dest_df = dest_df[[
         "train_line_ride_id", "train_line_station_num", "station_name",
         "arrival_delay_min", "is_canceled",
     ]].rename(columns={"station_name": "dest_name", "train_line_station_num": "dest_num"})
     dest_df = dest_df.drop_duplicates(subset=["train_line_ride_id", "dest_name"], keep="last")
+    print(f"    dest_df nach Dedup: {len(dest_df)} Zeilen")
 
     merged = origin_df.merge(dest_df, on="train_line_ride_id")
+    print(f"    merged nach Join: {len(merged)} Zeilen")
     merged = merged[merged["dest_num"] > merged["origin_num"]]
+    print(f"    merged nach dest_num > origin_num: {len(merged)} Zeilen")
     return merged
 
 
@@ -158,13 +162,17 @@ def build_route_stats(all_df):
     cutoff = date.today() - timedelta(days=DAYS_WINDOW)
 
     routes = {}
+    total_groups = 0
+    kept_groups = 0
     # Gruppierung nach EXAKTER Abfahrtszeit (nicht nur Stunde) — sonst werden auf
     # belebten Strecken mehrere verschiedene Züge derselben Stunde vermischt,
     # was zu falschen "ca."-Zeiten und mehreren Balken pro Tag im Chart führt.
     for (origin_name, dest_name, time_str), grp in merged.groupby(["origin_name", "dest_name", "time_str"]):
+        total_groups += 1
         samples = len(grp)
         if samples < MIN_SAMPLES_ROUTE:
             continue
+        kept_groups += 1
 
         pct = round(float(grp["is_problem"].mean()) * 100, 1)
         avg_delay = round(float(grp["arrival_delay_min"].mean()), 1)
@@ -190,6 +198,7 @@ def build_route_stats(all_df):
             "cancelledCount": cancelled_count,
             "days": days,
         }
+    print(f"    Gruppen gesamt: {total_groups}, davon >= {MIN_SAMPLES_ROUTE} Beobachtungen: {kept_groups}")
     return routes
 
 
