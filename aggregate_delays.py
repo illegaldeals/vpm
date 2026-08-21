@@ -48,13 +48,19 @@ ORIGIN_STATIONS = [
 # "Berlin Hbf (tief)" geführt werden. Beide Schreibweisen werden hier auf
 # denselben Anzeigenamen "Berlin Hbf" normalisiert.
 STATION_NAME_ALIASES = {
-    "Berlin Hbf (tief)": "Berlin Hbf",
-    "Berlin Hbf (S-Bahn)": "Berlin Hbf",
+    "Berlin Hauptbahnhof": "Berlin Hbf",
 }
 # Ziele werden auf dieselbe Liste großer Hauptbahnhöfe beschränkt — sonst
 # entstehen tausende Kombinationen mit kleinen/seltenen Zielbahnhöfen, die
 # die Datei unnötig aufblähen und praktisch kaum gesucht werden.
 DEST_STATIONS = set(ORIGIN_STATIONS)
+
+# Für die Diagnose: ein Stichwort pro Stadt, um alle Schreibweisen im
+# Datenset zu finden, unabhängig davon, wie ORIGIN_STATIONS sie benennt.
+DIAGNOSTIC_KEYWORDS = [
+    "Bremen", "Osnabrück", "Hannover", "Hamburg", "Berlin", "Köln",
+    "Frankfurt", "Stuttgart", "München", "Leipzig", "Dresden", "Düsseldorf",
+]
 
 NEEDED_COLUMNS = [
     "station_name", "train_type", "train_number", "line_number",
@@ -106,9 +112,13 @@ def load_month(month):
     ).fillna(0).round().astype(int)
     df["is_canceled"] = df["arrival_is_canceled"].fillna(False) | df["departure_is_canceled"].fillna(False)
 
-    berlin_variants = sorted(df.loc[df["station_name"].str.contains("erlin", na=False), "station_name"].unique())
-    if berlin_variants:
-        print(f"  Gefundene Berlin-Schreibweisen in {month}: {berlin_variants}")
+    all_names = df["station_name"].dropna().unique()
+    for kw in DIAGNOSTIC_KEYWORDS:
+        kw_matches = [n for n in all_names if kw.lower() in n.lower()]
+        hbf_matches = [n for n in kw_matches if "hbf" in n.lower() or "hauptbahnhof" in n.lower()]
+        shown = sorted(hbf_matches) if hbf_matches else sorted(kw_matches)
+        if shown:
+            print(f"  [{kw}] {shown[:8]}")
 
     df["station_name"] = df["station_name"].replace(STATION_NAME_ALIASES)
 
