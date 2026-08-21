@@ -84,6 +84,11 @@ def last_n_completed_months(n):
     return months
 
 
+def current_month():
+    today = date.today()
+    return f"{today.year:04d}-{today.month:02d}"
+
+
 def download_month(month):
     url = BASE_URL.format(month=month)
     print(f"Lade {url} ...")
@@ -240,7 +245,11 @@ def build_train_number_stats(all_df):
 
 
 def main():
-    months = last_n_completed_months(MONTHS_BACK)
+    # letzte N abgeschlossene Monate + Bestversuch für den laufenden Monat
+    # (falls das Datenset ihn schon teilweise veröffentlicht hat) — sonst
+    # würde das Tage-Fenster immer am Ende des Vormonats aufhören, weit vor
+    # "heute", und ein 30-Tage-Fenster hätte in Wahrheit nur ~10 echte Tage.
+    months = last_n_completed_months(MONTHS_BACK) + [current_month()]
     frames = []
     for month in months:
         df = load_month(month)
