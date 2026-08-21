@@ -136,20 +136,26 @@ def matched_route_legs(all_df):
     origin_df = origin_df[[
         "train_line_ride_id", "train_line_station_num", "station_name", "hour", "day", "time_str",
     ]].rename(columns={"station_name": "origin_name", "train_line_station_num": "origin_num"})
-    origin_df = origin_df.drop_duplicates(subset=["train_line_ride_id", "origin_name"])
-    print(f"    origin_df nach Dedup: {len(origin_df)} Zeilen")
+    # WICHTIG: train_line_ride_id ist offenbar NICHT pro Kalendertag eindeutig,
+    # sondern identifiziert denselben wiederkehrenden Zug über viele Tage hinweg.
+    # Dedup UND Join müssen deshalb (ride_id, Tag) zusammen nutzen — sonst
+    # werden entweder fast alle Tage weggeworfen oder Tage falsch verknüpft.
+    origin_df = origin_df.drop_duplicates(subset=["train_line_ride_id", "origin_name", "day"])
+    print(f"    origin_df nach Dedup (ride_id+Tag): {len(origin_df)} Zeilen")
 
     dest_df = all_df[all_df["station_name"].isin(DEST_STATIONS)].copy()
     print(f"    dest_df nach Stationsfilter: {len(dest_df)} Zeilen")
+    dest_time = dest_df["arrival_planned_time"].fillna(dest_df["departure_planned_time"])
+    dest_df["day"] = pd.to_datetime(dest_time).dt.date
     dest_df = dest_df[[
-        "train_line_ride_id", "train_line_station_num", "station_name",
+        "train_line_ride_id", "train_line_station_num", "station_name", "day",
         "arrival_delay_min", "is_canceled",
     ]].rename(columns={"station_name": "dest_name", "train_line_station_num": "dest_num"})
-    dest_df = dest_df.drop_duplicates(subset=["train_line_ride_id", "dest_name"], keep="last")
-    print(f"    dest_df nach Dedup: {len(dest_df)} Zeilen")
+    dest_df = dest_df.drop_duplicates(subset=["train_line_ride_id", "dest_name", "day"], keep="last")
+    print(f"    dest_df nach Dedup (ride_id+Tag): {len(dest_df)} Zeilen")
 
-    merged = origin_df.merge(dest_df, on="train_line_ride_id")
-    print(f"    merged nach Join: {len(merged)} Zeilen")
+    merged = origin_df.merge(dest_df, on=["train_line_ride_id", "day"], suffixes=("", "_dest"))
+    print(f"    merged nach Join (ride_id+Tag): {len(merged)} Zeilen")
     merged = merged[merged["dest_num"] > merged["origin_num"]]
     print(f"    merged nach dest_num > origin_num: {len(merged)} Zeilen")
     return merged
